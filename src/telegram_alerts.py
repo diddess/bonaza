@@ -29,6 +29,7 @@ Comportement :
 from __future__ import annotations
 
 import os
+import queue
 import threading
 import time
 from typing import Optional
@@ -42,6 +43,7 @@ class TelegramAlerts:
 
     API_URL = "https://api.telegram.org/bot{token}/sendMessage"
     MIN_INTERVAL_SEC = 1.0   # rate limit interne (Telegram = 30 msg/sec mais soyons doux)
+    _QUEUE_MAX = 500         # borne la file (alertes non critiques : on droppe si pleine)
 
     def __init__(
         self,
@@ -54,28 +56,63 @@ class TelegramAlerts:
         if enabled is None:
             enabled = os.getenv("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
         self.enabled = enabled and bool(self.token) and bool(self.chat_id)
-        self._lock      = threading.Lock()
+        self._lock      = threading.Lock()   # protege le demarrage du worker
         self._last_sent = 0.0
         self._fail_count = 0
+        # File + worker dedie : send() est NON BLOQUANT (n'execute JAMAIS time.sleep
+        # ni requests.post sur l'appelant). Indispensable car send() est appele depuis
+        # des handlers asyncio (telegram_reader) : un appel bloquant gelait l'event loop
+        # et retardait la reception des messages Telethon (latence 56-170s).
+        self._queue: "queue.Queue" = queue.Queue(maxsize=self._QUEUE_MAX)
+        self._worker: Optional[threading.Thread] = None
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        with self._lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._worker = threading.Thread(
+                target=self._worker_loop, name="tg-alerts-worker", daemon=True)
+            self._worker.start()
+
+    def _worker_loop(self) -> None:
+        """Tourne dans un THREAD dedie (hors event loop) : rate-limit + HTTP."""
+        while True:
+            text, parse_mode, silent = self._queue.get()
+            try:
+                delta = time.time() - self._last_sent
+                if delta < self.MIN_INTERVAL_SEC:
+                    time.sleep(self.MIN_INTERVAL_SEC - delta)   # OK : thread, pas le loop
+                self._last_sent = time.time()
+                self._post(text, parse_mode, silent)
+            except Exception as e:
+                logger.warning(f"[Telegram] worker : {e}")
+            finally:
+                self._queue.task_done()
 
     def send(self, text: str, parse_mode: str = "Markdown", silent: bool = False) -> bool:
         """
-        Envoie un message Telegram. Retourne True si envoye, False sinon.
-        silent=True : pas de notification sonore (msg arrive quand meme).
-        Ne leve jamais d'exception : si Telegram down, on log warning et continue.
+        Met le message en file pour envoi par le worker. NON BLOQUANT : retourne
+        immediatement (True = enfile, False = desactive/file pleine). L'envoi reel
+        (rate-limit + requests.post) se fait dans le thread worker, jamais sur
+        l'appelant -> n'affecte pas l'event loop asyncio.
         """
         if not self.enabled:
             return False
-        # Rate limit interne
-        with self._lock:
-            now = time.time()
-            delta = now - self._last_sent
-            if delta < self.MIN_INTERVAL_SEC:
-                time.sleep(self.MIN_INTERVAL_SEC - delta)
-            self._last_sent = time.time()
-        # Truncate (Telegram = 4096 chars max)
         if len(text) > 4000:
             text = text[:3990] + "…(truncated)"
+        self._ensure_worker()
+        try:
+            self._queue.put_nowait((text, parse_mode, silent))
+            return True
+        except queue.Full:
+            self._fail_count += 1
+            logger.warning("[Telegram] file d'alertes pleine -> message ignore")
+            return False
+
+    def _post(self, text: str, parse_mode: str, silent: bool) -> bool:
+        """Envoi HTTP reel (appele UNIQUEMENT par le worker). Ne leve jamais."""
         try:
             payload = {
                 "chat_id":             self.chat_id,
@@ -101,6 +138,14 @@ class TelegramAlerts:
             self._fail_count += 1
             logger.warning(f"[Telegram] envoi echoue : {e}")
             return False
+
+    def flush(self, timeout: float = 15.0) -> None:
+        """Attend que TOUS les messages enfiles soient reellement envoyes (utile
+        pour les scripts one-shot / tests). unfinished_tasks tombe a 0 quand le
+        worker a appele task_done() pour chaque message (donc apres l'envoi)."""
+        end = time.time() + timeout
+        while self._queue.unfinished_tasks and time.time() < end:
+            time.sleep(0.2)
 
     # -----------------------------------------------------------------
     # Formatters Bonaza
@@ -205,7 +250,8 @@ if __name__ == "__main__":
     if not a.enabled:
         print("Telegram alerts desactives. Renseigner TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_ALERTS_ENABLED=true dans .env")
         sys.exit(1)
-    print("Envoi message de test...")
+    print("Envoi message de test (enfile + flush)...")
     ok = a.send("✅ *Bonaza Telegram*\nTest de connexion OK\n"
                 "Si tu vois ce message, les alertes sont fonctionnelles.")
-    print(f"resultat : {'OK' if ok else 'ECHEC'}")
+    a.flush()
+    print(f"resultat enfilage : {'OK' if ok else 'ECHEC'} (envoi reel dans le worker)")
