@@ -1,0 +1,28 @@
+# --- Secrets / environnement (JAMAIS commité) ---
+.env
+.env.*
+*.env
+
+# --- Données & logs (volumineux, runtime) ---
+data/
+data_demo/
+logs/
+logs_demo/
+
+# --- Sauvegardes & snapshots ---
+*.bak
+*.bak.*
+*.bak_*
+*.bak-*
+*_snapshot_*.tgz
+*.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Divers ---
+*.zip

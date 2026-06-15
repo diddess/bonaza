@@ -1,0 +1,74 @@
+# Bonaza VPS2 — Compose v2 (Docker 29 / compose 2.40). Comportement identique a
+# la prod VPS1 (memes commandes, volumes, ports, mem_limits). Ajouts surs :
+#   - cle 'version' legacy retiree (ignoree par compose v2)
+#   - limites de logs json-file (audit INFRA-11 : logs Docker non bornes sur VPS1)
+# Lancer : cd /opt/bonaza && docker compose build && docker compose up -d
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ---------- Service principal : moteurs + copieur + OrderExecutor ----------
+  bonaza_main:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bonaza:latest
+    container_name: bonaza_main
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    command: ["python", "src/main.py"]
+    mem_limit: 1500m
+    logging: *default-logging
+
+  # ---------- Dashboard Streamlit (proxifie par Nginx host) ----------
+  bonaza_dashboard:
+    image: bonaza:latest
+    container_name: bonaza_dashboard
+    restart: unless-stopped
+    depends_on:
+      - bonaza_main
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    command:
+      - python
+      - -m
+      - streamlit
+      - run
+      - src/dashboard.py
+      - --server.headless=true
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --browser.gatherUsageStats=false
+    ports:
+      - "127.0.0.1:8501:8501"
+    mem_limit: 800m
+    logging: *default-logging
+
+  # ---------- Bot Telegram admin ----------
+  bonaza_bot:
+    image: bonaza:latest
+    container_name: bonaza_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs:ro
+      - ./.env:/app/.env:ro
+    command: ["python", "src/telegram_bot.py"]
+    mem_limit: 256m
+    logging: *default-logging
