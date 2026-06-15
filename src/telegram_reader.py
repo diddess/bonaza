@@ -349,6 +349,22 @@ async def run_telegram_copier(executor, group_id):
     @client.on(events.NewMessage(chats=group_id))
     async def _handler(event):
         txt = event.message.message or ""
+        msg_dt = getattr(event.message, "date", None)
+        # GARDE-FOU anti-peremption : un message trop vieux (typiquement rejoue par
+        # catch_up apres une reconnexion) n'est NI relaye NI traite -> aucune action
+        # de trading sur un signal perime, pas de spam de vieux messages. Les messages
+        # frais (<= seuil) suivent le flux normal (le copieur applique en plus son
+        # propre garde ENTRY_MAX_AGE_SEC sur les entrees).
+        if msg_dt is not None:
+            from datetime import datetime, timezone
+            try:
+                age = (datetime.now(timezone.utc) - msg_dt).total_seconds()
+            except Exception:
+                age = 0.0
+            if age > ENTRY_MAX_AGE_SEC:
+                logger.warning("[TG] message PERIME ignore (age %.0fs > %.0fs) : %s"
+                               % (age, ENTRY_MAX_AGE_SEC, txt[:60]))
+                return
         # RELAIS : renvoyer le message brut du groupe vers le bot Bonaza
         if txt.strip():
             try:
@@ -357,7 +373,7 @@ async def run_telegram_copier(executor, group_id):
             except Exception:
                 pass
         try:
-            await copier.handle_text(txt, msg_dt=getattr(event.message, "date", None))
+            await copier.handle_text(txt, msg_dt=msg_dt)
         except Exception as e:
             logger.error("[TG] handler erreur : %s" % e)
 
@@ -388,6 +404,16 @@ async def run_telegram_copier(executor, group_id):
                 me = await client.get_me()
                 logger.info("[TG] Copieur connecte (@%s) | ecoute groupe %s | XAUUSD exact_levels"
                             % (getattr(me, "username", "?"), group_id))
+                # RE-SYNC des updates : sans ca, apres une (re)connexion Telethon peut
+                # rester connecte mais ne PLUS recevoir les NewMessage (pts/qts desync)
+                # -> messages du groupe jamais livres. catch_up() resynchronise et
+                # rejoue les messages manques (les ENTRY perimees sont filtrees plus bas
+                # + par ENTRY_MAX_AGE_SEC -> aucun ordre sur signal vieux).
+                try:
+                    await client.catch_up()
+                    logger.info("[TG] catch_up effectue (re-sync des updates)")
+                except Exception as e:
+                    logger.warning("[TG] catch_up echoue : %s" % str(e)[:120])
                 await client.run_until_disconnected()
             except Exception as e:
                 logger.error("[TG] connexion perdue (%s) -> retry 30s" % str(e)[:120])
