@@ -489,7 +489,8 @@ async def run_all(force_dry: bool = False) -> None:
                 from telegram_reader import run_telegram_copier
                 TG_GROUP_ID = -1001723080041
                 tasks.append(asyncio.create_task(
-                    run_telegram_copier(executor, TG_GROUP_ID),
+                    run_telegram_copier(executor, TG_GROUP_ID,
+                                        market_state=(s10_runner.market_state if s10_runner else None)),
                     name="telegram_copier",
                 ))
                 logger.info("[TG] tache copieur Telegram lancee")

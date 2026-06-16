@@ -48,9 +48,10 @@ def _load_env(p):
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 class TelegramCopier:
-    def __init__(self, executor, instrument="XAUUSD"):
+    def __init__(self, executor, instrument="XAUUSD", market_state=None):
         self.executor = executor
         self.instrument = instrument
+        self._ms = market_state   # MarketState (structure M5) pour la gestion adaptative
         self._peak = {}     # deal_id -> profit max favorable vu en live (pts)
         self._be   = set()  # deal_id -> breakeven demande par le groupe (filet moteur)
         # serialise le traitement des messages : un BREAKEVEN/CLOSE qui arrive
@@ -234,7 +235,31 @@ class TelegramCopier:
             if profit > peak:
                 peak = profit
                 self._peak[p.deal_id] = peak
-            if peak >= LOCK_ARM_PTS:
+            # GESTION ADAPTATIVE (with-trend = laisse courir ; counter/range = cliquet),
+            # via la MEME fonction pure que le scalp demo (profit_lock.adaptive_action),
+            # si la structure M5 est disponible ; sinon repli sur le cliquet pts fixe.
+            st = self._ms.get(self.instrument, "M5") if self._ms is not None else None
+            atr = (st.last_indicators.get("atr") if (st and st.last_indicators) else None)
+            if st is not None and atr and atr > 0:
+                from profit_lock import adaptive_action
+                cur_sl = float(getattr(p, "sl_level", 0.0) or 0.0)
+                swings = st.swing_lows if long else st.swing_highs
+                kind, payload, mode = adaptive_action(
+                    long, p.entry_level, price, peak, atr, st.trend, swings,
+                    st.events, getattr(p, "opened_at", None), cur_sl)
+                if kind == "close":
+                    reason = ("TG_ADAPT_%s" % payload[4:]) if str(payload).startswith("REV_") \
+                        else ("TG_LOCK_%+.1fpts" % profit)
+                    logger.info("[TG] ADAPT %s : %s (%s, profit %+.1f, pic %+.1f) -> cloture"
+                                % (p.deal_id, reason, mode, profit, peak))
+                    if await self.executor.close_position(p.deal_id, reason):
+                        self._forget(p.deal_id)
+                    continue
+                elif kind == "move_sl":
+                    if await self.executor.move_stop_to(p.deal_id, payload):
+                        logger.info("[TG] ADAPT %s : SL IG -> %.2f (%s, pic +%.1f)"
+                                    % (p.deal_id, payload, mode, peak))
+            elif peak >= LOCK_ARM_PTS:
                 floor = max(LOCK_EXIT_PTS, RATCHET_PCT * peak)
                 if profit <= floor:
                     logger.info("[TG] CLIQUET %s : pic +%.1f -> repli +%.1f pts (plancher +%.1f) "
@@ -242,8 +267,6 @@ class TelegramCopier:
                     if await self.executor.close_position(p.deal_id, "TG_LOCK_%+.1fpts" % profit):
                         self._forget(p.deal_id)
                     continue
-                # repercuter le plancher sur le SL IG (protection broker-side :
-                # survit aux restarts/crashs). Short: SL = entry - plancher.
                 new_sl = round(p.entry_level + floor, 2) if long \
                     else round(p.entry_level - floor, 2)
                 cur_sl = float(getattr(p, "sl_level", 0.0) or 0.0)
@@ -312,7 +335,7 @@ class TelegramCopier:
                 await self._on_ambiguous(sig)
 
 
-async def run_telegram_copier(executor, group_id):
+async def run_telegram_copier(executor, group_id, market_state=None):
     """Tache asyncio : connecte Telethon, copie les signaux. Ne se termine JAMAIS
     (sinon FIRST_COMPLETED tue le process)."""
     _load_env(ENVF)
@@ -328,7 +351,7 @@ async def run_telegram_copier(executor, group_id):
         while True:
             await asyncio.sleep(3600)
 
-    copier = TelegramCopier(executor)
+    copier = TelegramCopier(executor, market_state=market_state)
     client = TelegramClient(SESSION, int(api_id), api_hash)
 
     # SHADOW 'Groupe Prive' : copie PAPIER (aucun ordre reel), meme client
@@ -345,6 +368,16 @@ async def run_telegram_copier(executor, group_id):
                 logger.error("[SHADOW] handler erreur : %s" % e)
     except Exception as e:
         logger.warning("[SHADOW] non demarre : %s" % e)
+
+    # DIAGNOSTIC TEMPORAIRE : logge le chat_id de TOUT message recu, pour verifier
+    # que Telethon recoit bien les updates et identifier le vrai chat_id du groupe.
+    @client.on(events.NewMessage())
+    async def _debug_all(event):
+        try:
+            logger.info("[TG-DEBUG] update recu | chat_id=%s | %s"
+                        % (event.chat_id, (event.message.message or "")[:50]))
+        except Exception:
+            pass
 
     @client.on(events.NewMessage(chats=group_id))
     async def _handler(event):
@@ -404,6 +437,16 @@ async def run_telegram_copier(executor, group_id):
                 me = await client.get_me()
                 logger.info("[TG] Copieur connecte (@%s) | ecoute groupe %s | XAUUSD exact_levels"
                             % (getattr(me, "username", "?"), group_id))
+                # ABONNEMENT AUX UPDATES DE CANAUX : pour recevoir les NewMessage d'un
+                # canal/supergroupe, Telethon doit avoir l'entite en cache ET etre
+                # "abonne" cote serveur. get_dialogs() fait les deux ; sans ca, apres
+                # une reconnexion le client reste connecte mais ne recoit AUCUN message
+                # du canal (handler jamais declenche).
+                try:
+                    await client.get_dialogs()
+                    logger.info("[TG] get_dialogs OK (entites + abonnement updates canaux)")
+                except Exception as e:
+                    logger.warning("[TG] get_dialogs : %s" % str(e)[:120])
                 # RE-SYNC des updates : sans ca, apres une (re)connexion Telethon peut
                 # rester connecte mais ne PLUS recevoir les NewMessage (pts/qts desync)
                 # -> messages du groupe jamais livres. catch_up() resynchronise et
