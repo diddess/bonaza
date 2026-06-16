@@ -1,7 +1,9 @@
 """Copieur de signaux Telegram (TRADAMAX) -> ordres XAUUSD (demo).
 ENTRY -> 3 positions (TP1/TP2/TP3 'open') en exact_levels.
-BREAKEVEN -> IGNORE depuis le 12/06/2026 (decision operateur : le cliquet
-             protege deja ; un BE juste apres l'ENTRY fermait tout a l'ouverture).
+BREAKEVEN -> REACTIVE le 16/06/2026 (latence resolue) : verrouille le SL a
+             entree +/- BE_OFFSET_PTS (lock +1 pt demande operateur). Ne touche
+             que les positions ouvertes AVANT le message (garde anti-incident
+             12/06 ou un BE en retard fermait des jambes fraiches a l'ouverture).
 CLOSE -> ferme toutes les positions TG (formes explicites uniquement).
 CLOSE_PARTIAL -> ferme la seule jambe TPn visee (fix faux-CLOSE 2026-06-11).
 CANCEL_PENDING -> no-op (copieur market-only, aucun ordre en attente cote IG).
@@ -31,6 +33,10 @@ RATCHET_PCT            = 0.5
 RATCHET_IG_GAP_PTS     = 5.0  # repercute sur le SL IG seulement si le prix est a
                               # >= 5 pts du nouveau SL (min stop IG XAU = 4 pts)
 RATCHET_IG_MIN_IMPROVE = 2.0  # anti-spam API : bouge le SL IG par pas de >= 2 pts
+
+# BREAKEVEN du groupe (reactive 16/06) : SL verrouille a entree +/- ce lock (pts).
+# Demande operateur : +1 pt au lieu d'un break-even strict a l'entree.
+BE_OFFSET_PTS = 1.0
 
 # --- Gardes anti-peremption (incident latence 12/06 : messages livres ~11 min
 #     en retard par rafale apres une coupure Telethon silencieuse) ---
@@ -130,11 +136,22 @@ class TelegramCopier:
                     (sig["direction"], self.instrument, opened, entry, sl,
                      sig.get("tp1"), sig.get("tp2")))
 
-    async def _on_breakeven(self):
-        ps = self._tg_positions()
+    async def _on_breakeven(self, msg_dt=None):
+        """BREAKEVEN du groupe : verrouille le SL a entree +/- BE_OFFSET_PTS.
+        N'agit que sur les positions ouvertes AVANT le message (un BE en retard
+        ne doit pas toucher des jambes nees apres lui -- incident 12/06). Si IG
+        refuse le SL (prix trop proche), filet moteur self._be : on ferme nous-
+        memes des que le prix revient au niveau verrouille."""
+        ps = self._opened_before(self._tg_positions(), msg_dt)
         for p in ps:
+            long = p.direction in ("LONG", "BUY")
+            lock = round(p.entry_level + BE_OFFSET_PTS, 2) if long \
+                else round(p.entry_level - BE_OFFSET_PTS, 2)
             self._be.add(p.deal_id)                       # filet moteur si IG refuse le SL
-            await self.executor.move_stop_to(p.deal_id, p.entry_level)
+            ok = await self.executor.move_stop_to(p.deal_id, lock)
+            logger.info("[TG] BREAKEVEN %s : SL -> %.2f (entree %.2f, lock +%.0f pt) %s"
+                        % (p.deal_id, lock, p.entry_level, BE_OFFSET_PTS,
+                           "OK" if ok else "refuse IG -> filet moteur"))
         logger.info("[TG] BREAKEVEN -> %d position(s)" % len(ps))
 
     def _opened_before(self, ps, msg_dt):
@@ -277,11 +294,13 @@ class TelegramCopier:
                         logger.info("[TG] CLIQUET %s : SL IG -> %.2f (pic +%.1f, "
                                     "plancher +%.1f pts garanti)"
                                     % (p.deal_id, new_sl, peak, floor))
-            # 2) BREAKEVEN MOTEUR (filet si IG a refuse le SL trop proche)
+            # 2) BREAKEVEN MOTEUR (filet si IG a refuse le SL trop proche) :
+            #    verrou a entree +/- BE_OFFSET_PTS (lock +1 pt demande operateur).
             if p.deal_id in self._be:
-                if (long and price <= p.entry_level) or (not long and price >= p.entry_level):
-                    logger.info("[TG] BREAKEVEN moteur %s : prix %.2f vs entree %.2f -> cloture ~0"
-                                % (p.deal_id, price, p.entry_level))
+                lock = p.entry_level + BE_OFFSET_PTS if long else p.entry_level - BE_OFFSET_PTS
+                if (long and price <= lock) or (not long and price >= lock):
+                    logger.info("[TG] BREAKEVEN moteur %s : prix %.2f vs verrou %.2f -> cloture +%.0f pt"
+                                % (p.deal_id, price, lock, BE_OFFSET_PTS))
                     if await self.executor.close_position(p.deal_id, "TG_BREAKEVEN"):
                         self._forget(p.deal_id)
                     continue
@@ -320,11 +339,10 @@ class TelegramCopier:
             if sig["type"] == "ENTRY":
                 await self._on_entry(sig, lag_sec=lag_sec)
             elif sig["type"] == "BREAKEVEN":
-                # DECISION DIDIER 12/06/2026 : BREAKEVEN du groupe IGNORE.
-                # Le cliquet protege deja les gains, et un BE poste juste apres
-                # l'ENTRY fermait les jambes des l'ouverture (incident 12:18).
-                logger.info("[TG] BREAKEVEN du groupe ignore (protection cliquet "
-                            "active, decision operateur 12/06)")
+                # REACTIVE 16/06/2026 (latence resolue) : verrou SL a entree+1 pt.
+                # Garde anti-incident 12/06 : ne touche que les positions ouvertes
+                # avant le message (via _opened_before dans _on_breakeven).
+                await self._on_breakeven(msg_dt=msg_dt)
             elif sig["type"] == "CLOSE":
                 await self._on_close(sig.get("reason", "close"), msg_dt=msg_dt)
             elif sig["type"] == "CLOSE_PARTIAL":
