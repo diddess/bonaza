@@ -58,6 +58,70 @@ services:
     mem_limit: 800m
     logging: *default-logging
 
+  # ---------- DEMO isole : scalping S10+M5 uniquement (compte DEMO) ----------
+  # N'utilise QUE .env.demo (IG_ACCOUNT_TYPE=DEMO) et des volumes data_demo/logs_demo
+  # separes -> aucune interaction avec le live (bonaza_main). Lance main_scalp_demo.py.
+  bonaza_demo:
+    # IMAGE DEDIEE : bonaza-demo:latest (build propre) -> ne touche JAMAIS bonaza:latest
+    # (le live). Rebuild/recreate du demo n'impacte donc pas bonaza_main.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bonaza-demo:latest
+    container_name: bonaza_demo
+    restart: unless-stopped
+    env_file:
+      - .env.demo
+    environment:
+      # neutralise les chemins Windows herites du .env.demo + force l'isolation
+      - BONAZA_DB_PATH=/app/data/bonaza.db
+      - BONAZA_LOG_PATH=/app/logs
+      - BONAZA_MODE=PAPER
+      - IG_ACCOUNT_TYPE=DEMO
+      - S10_COLLECTOR_ENABLED=true
+      - MTF_ENABLED=true
+      # vrai grain 10s : souscription CHART:{epic}:TICK (UTM=heure reelle + LTV) -> S10 authentique
+      - CHART_TICK_ENABLED=true
+    volumes:
+      - ./data_demo:/app/data
+      - ./logs_demo:/app/logs
+      - ./.env.demo:/app/.env:ro
+    command: ["python", "src/main_scalp_demo.py"]
+    mem_limit: 800m
+    logging: *default-logging
+
+  # ---------- LIVE scalp DAX (bascule 16/06) : 3 jambes, DAX uniquement ----------
+  # Compte REEL (.env / LUZQM). REMPLACE le copieur : a ne lancer qu'APRES avoir
+  # arrete bonaza_main (sinon 2 sessions IG sur le meme compte reel = conflit).
+  # Garde derriere un PROFIL compose -> ne demarre JAMAIS via `up -d` global.
+  # Cutover :  docker compose stop bonaza_main
+  #            docker compose --profile live-scalp up -d bonaza_live_scalp
+  bonaza_live_scalp:
+    image: bonaza:latest
+    container_name: bonaza_live_scalp
+    profiles: ["live-scalp"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - BONAZA_DB_PATH=/app/data/bonaza.db
+      - BONAZA_LOG_PATH=/app/logs
+      - BONAZA_MODE=LIVE
+      - IG_ACCOUNT_TYPE=LIVE
+      # double confirmation exigee par main_scalp_live._live_authorized()
+      - ALLOW_LIVE_SCALP=true
+      - CONFIRM_LIVE_SCALP=true
+      - S10_COLLECTOR_ENABLED=true
+      - MTF_ENABLED=true
+      - CHART_TICK_ENABLED=true
+    volumes:
+      - ./data_live_scalp:/app/data
+      - ./logs_live_scalp:/app/logs
+      - ./.env:/app/.env:ro
+    command: ["python", "src/main_scalp_live.py"]
+    mem_limit: 800m
+    logging: *default-logging
+
   # ---------- Bot Telegram admin ----------
   bonaza_bot:
     image: bonaza:latest
