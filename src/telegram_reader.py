@@ -38,6 +38,13 @@ RATCHET_IG_MIN_IMPROVE = 2.0  # anti-spam API : bouge le SL IG par pas de >= 2 p
 # Demande operateur : +1 pt au lieu d'un break-even strict a l'entree.
 BE_OFFSET_PTS = 1.0
 
+# COPIE PURE (demande operateur 17/06) : COPIER_PROTECTION=off -> le copieur NE
+# protege PLUS les positions (ni cliquet, ni adaptatif, ni break-even). Il suit
+# uniquement les signaux du fournisseur (ENTRY/CLOSE/CLOSE_PARTIAL) et laisse
+# courir les brackets SL/TP du signal. Raison : la securisation etranglait les
+# gros gains de tendance ("annihile les chances"). Reactivable en remettant 'on'.
+PROTECTION_ENABLED = os.getenv("COPIER_PROTECTION", "on").strip().lower() not in ("off", "false", "0", "no")
+
 # --- Gardes anti-peremption (incident latence 12/06 : messages livres ~11 min
 #     en retard par rafale apres une coupure Telethon silencieuse) ---
 LAT_WARN_SEC      = 30.0   # message plus vieux -> warning + alerte Telegram
@@ -233,6 +240,8 @@ class TelegramCopier:
             logger.info("[TG] /tg closeall confirme par l'operateur -> fermeture totale")
             async with self._msg_lock:
                 await self._on_close("MANUAL_CONFIRM")
+        if not PROTECTION_ENABLED:
+            return   # COPIE PURE : aucune gestion auto (cliquet/adaptatif/BE)
         feed = getattr(self.executor, "_feed", None)
         if feed is None:
             return
@@ -306,8 +315,13 @@ class TelegramCopier:
                     continue
 
     async def run_manager(self):
-        logger.info("[TG] gestion active copieur demarree (tick %.0fs | verrou +%.0f/+%.0f pts)"
-                    % (MANAGE_TICK_SEC, LOCK_ARM_PTS, LOCK_EXIT_PTS))
+        if not PROTECTION_ENABLED:
+            logger.warning("[TG] COPIE PURE : gestion active DESACTIVEE (ni cliquet, ni "
+                           "adaptatif, ni break-even) -> suit le fournisseur uniquement, "
+                           "brackets SL/TP du signal laisses courir")
+        else:
+            logger.info("[TG] gestion active copieur demarree (tick %.0fs | verrou +%.0f/+%.0f pts)"
+                        % (MANAGE_TICK_SEC, LOCK_ARM_PTS, LOCK_EXIT_PTS))
         while True:
             try:
                 await self._manage_tick()
@@ -339,10 +353,13 @@ class TelegramCopier:
             if sig["type"] == "ENTRY":
                 await self._on_entry(sig, lag_sec=lag_sec)
             elif sig["type"] == "BREAKEVEN":
-                # REACTIVE 16/06/2026 (latence resolue) : verrou SL a entree+1 pt.
-                # Garde anti-incident 12/06 : ne touche que les positions ouvertes
-                # avant le message (via _opened_before dans _on_breakeven).
-                await self._on_breakeven(msg_dt=msg_dt)
+                # En COPIE PURE (protection off, 17/06) : on IGNORE le BE du groupe
+                # (c'est un dispositif de protection qui scratch le trade). Sinon
+                # (protection on) : verrou SL a entree+1 pt (reactive 16/06).
+                if PROTECTION_ENABLED:
+                    await self._on_breakeven(msg_dt=msg_dt)
+                else:
+                    logger.info("[TG] BREAKEVEN ignore (copie pure : protection desactivee)")
             elif sig["type"] == "CLOSE":
                 await self._on_close(sig.get("reason", "close"), msg_dt=msg_dt)
             elif sig["type"] == "CLOSE_PARTIAL":
