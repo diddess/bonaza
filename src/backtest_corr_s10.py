@@ -123,4 +123,7 @@ print("VALIDE   single SL1.0/TP3.0          :", run({"mode":"single","sl":1.0,"t
 print("PROPOSE  3-jambes TP3/4.5/6 SL2 lock1 :", run({"mode":"multi","sl":2.0,"tps":[3.0,4.5,6.0],"lock":1.0}, cep,ctr))
 print("variante 3-jambes lock0.5            :", run({"mode":"multi","sl":2.0,"tps":[3.0,4.5,6.0],"lock":0.5}, cep,ctr))
 print("variante 3-jambes lock0 (break-even) :", run({"mode":"multi","sl":2.0,"tps":[3.0,4.5,6.0],"lock":0.0}, cep,ctr))
+print("LIVE     2-jambes TP3/6 SL2 lock0.5   :", run({"mode":"multi","sl":2.0,"tps":[3.0,6.0],"lock":0.5}, cep,ctr))
+print("variante 2-jambes TP3/6 lock1.0       :", run({"mode":"multi","sl":2.0,"tps":[3.0,6.0],"lock":1.0}, cep,ctr))
+print("variante 2-jambes TP3/6 lock0 (BE)    :", run({"mode":"multi","sl":2.0,"tps":[3.0,6.0],"lock":0.0}, cep,ctr))
 print("ref      single SL2.0/TP6.0           :", run({"mode":"single","sl":2.0,"tp":6.0}, cep,ctr))

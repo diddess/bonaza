@@ -25,12 +25,15 @@ LEG_SIZE  = 0.5               # taille par jambe (clampee au mini IG par l'execu
 TICK_SEC  = 2.0
 
 
-def build_legs(direction, entry: float, atr: float, name: str) -> List[TradeSetup]:
-    """3 TradeSetup (jambes) autour de `entry`, SL commun 2xATR, TP echelonnes."""
+def build_legs(direction, entry: float, atr: float, name: str, tps=None) -> List[TradeSetup]:
+    """N TradeSetup (jambes) autour de `entry`, SL commun 2xATR, TP echelonnes.
+    `tps` = liste des multiples d'ATR (defaut TPS_ATR = 3 jambes 3/4.5/6). Le live
+    sous-capitalise passe tps=[3.0, 6.0] (2 jambes : rapide + runner)."""
+    tps = tps if tps is not None else TPS_ATR
     long = direction == SignalDirection.LONG
     sl_d = SL_ATR * atr
     legs = []
-    for tpm in TPS_ATR:
+    for tpm in tps:
         tp_d = tpm * atr
         sl = entry - sl_d if long else entry + sl_d
         tp = entry + tp_d if long else entry - tp_d
@@ -94,9 +97,9 @@ class MultiLegManager:
                             "(entree+%.1fxATR)" % (name, len(still), new_sl, LOCK_ATR))
 
     async def run(self) -> None:
-        logger.info("[SCALP3] gestion 3-jambes active (tick %.0fs | TP %s xATR, SL %.1fxATR, "
-                    "lock TP1 +%.1fxATR, %.2f lot/jambe)"
-                    % (TICK_SEC, TPS_ATR, SL_ATR, LOCK_ATR, LEG_SIZE))
+        logger.info("[SCALP3] gestion multi-jambes active (tick %.0fs | SL %.1fxATR, "
+                    "lock TP1 +%.1fxATR, %.2f lot/jambe | TP par jambe selon build_legs)"
+                    % (TICK_SEC, SL_ATR, LOCK_ATR, LEG_SIZE))
         while True:
             try:
                 await asyncio.sleep(TICK_SEC)

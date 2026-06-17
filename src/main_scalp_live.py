@@ -13,8 +13,10 @@ Differences avec main_scalp_demo.py :
     (les perdantes restent gerees par leur SL/TP IG, peuvent passer la nuit).
     Decision operateur 16/06 ("cloturer si gagnant").
 
-Modele inchange (multileg.py) : 3 jambes TP 3/4.5/6 xATR, SL commun 2xATR,
-SL -> entree +/- 0.5xATR des que TP1 touche. 0.5 lot/jambe.
+Modele (multileg.py) : LIVE = 2 jambes TP 3/6 xATR (sous-capitalise : le reel ne
+marge pas 3 jambes -> INSUFFICIENT_FUNDS sur la 3e). SL commun 2xATR, SL -> entree
++/- 0.5xATR des que TP1 touche. 0.5 lot/jambe. (La demo garde 3 jambes 3/4.5/6.)
+Backtest 17/06 : 2 jambes 3/6 ~= 3 jambes (net 3279 vs 3196, Sharpe 1.85 vs 1.79).
 """
 from __future__ import annotations
 
@@ -47,6 +49,11 @@ SUBSCRIPTIONS = [{"epic": inst.epic, "scale": inst.scale} for inst in INSTRUMENT
 EOD_HOUR_UTC      = INSTRUMENTS["DAX"].session_end   # 16
 EOD_MIN_PROFIT_PT = float(os.getenv("EOD_MIN_PROFIT_PT", "0.0"))
 
+# CAPITAL : le compte reel ne marge pas 3 jambes DAX (INSUFFICIENT_FUNDS sur la 3e).
+# -> 2 jambes ASSUMEES : TP1 rapide (3xATR) + runner (6xATR), SL commun 2xATR,
+#    SL -> entree+0.5xATR des TP1 (gestion multileg inchangee). Decision 17/06.
+LIVE_TPS = [3.0, 6.0]
+
 
 def _live_authorized() -> bool:
     """LIVE autorise seulement avec double confirmation explicite."""
@@ -60,14 +67,14 @@ def _live_authorized() -> bool:
                      "Scalp LIVE non arme. Arret.")
         return False
     logger.warning("!!! SCALP LIVE ARME SUR COMPTE REEL !!! account=%s | DAX uniquement | "
-                   "0.5 lot/jambe | EOD close-gagnants %dh UTC" %
-                   (config.ig.account_id, EOD_HOUR_UTC))
+                   "%d jambes TP%s xATR | 0.5 lot/jambe | EOD close-gagnants %dh UTC" %
+                   (config.ig.account_id, len(LIVE_TPS), LIVE_TPS, EOD_HOUR_UTC))
     return True
 
 
 async def main() -> None:
     setup_logger(config.logs.level, config.logs.path)
-    logger.info("=== SCALP LIVE DAX (3 jambes) : demarrage ===")
+    logger.info("=== SCALP LIVE DAX (%d jambes TP%s xATR) : demarrage ===" % (len(LIVE_TPS), LIVE_TPS))
     logger.info(f"mode={config.trading.mode} | account_type={config.ig.account_type} "
                 f"| account={config.ig.account_id} | feed={list(INSTRUMENTS)} "
                 f"| trade={sorted(TRADE_ONLY)}")
@@ -140,13 +147,13 @@ async def main() -> None:
                     continue
                 entry = feed.get_price(inst.epic) or candle.close
                 deal_ids = []
-                for leg in build_legs(setup.direction, entry, atr, name):
+                for leg in build_legs(setup.direction, entry, atr, name, tps=LIVE_TPS):
                     d = await executor._handle_signal(leg, instrument=name, exact_levels=True)
                     deal_ids.append(d)
                 if any(deal_ids):
                     last_entry[name] = now
                     mlm.register(name, setup.direction, entry, atr, deal_ids)
-                    logger.info(f"[SCALP-LIVE] {name} 3 JAMBES | {setup.direction.value} "
+                    logger.info(f"[SCALP-LIVE] {name} {len(LIVE_TPS)} JAMBES | {setup.direction.value} "
                                 f"E={entry:.2f} ATR={atr:.2f} deals={[d for d in deal_ids if d]}")
             except asyncio.CancelledError:
                 break
